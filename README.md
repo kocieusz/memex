@@ -7,7 +7,7 @@
 Manage [Agent Skills](https://agentskills.io) across harnesses — Claude Code,
 Codex, pi — with symlinks from one git-versioned library.
 
-[Install](#install) · [Usage](#usage) · [Configuration](#configuration) · [Development](#development)
+[Install](#install) · [Usage](#usage) · [Configuration](#configuration) · [Contributing](#contributing)
 
 ---
 
@@ -101,18 +101,8 @@ library = "~/.dotfiles/skills"
 Precedence, highest first: the `--source` flag, the `MEMEX_SOURCE` environment
 variable, the config file, the default.
 
-## Development
+## Contributing
 
-Uses [Task](https://taskfile.dev):
-
-```sh
-task         # list available tasks
-task build   # build bin/memex
-task test    # run the test suite
-```
-
-Layout: `main.go` wires the [kong](https://github.com/alecthomas/kong) CLI;
-`internal/config` loads the config file, `internal/library` scans the skill
-library, `internal/target` classifies target entries and performs all linking,
-`internal/remote` handles `clone`, and `internal/tui` is the
-[bubbletea](https://github.com/charmbracelet/bubbletea) checklist.
+memex doesn't accept external pull requests — read
+[CONTRIBUTING.md](CONTRIBUTING.md) before opening one. Bug reports and ideas
+are very welcome as [issues](https://github.com/kocieusz/memex/issues).
