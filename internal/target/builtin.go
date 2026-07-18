@@ -61,13 +61,3 @@ func Resolve(nameOrPath string) (string, error) {
 	}
 	return "", fmt.Errorf("unknown target %q: expected one of %s, or a path", nameOrPath, strings.Join(names, ", "))
 }
-
-// BuiltinFor returns the builtin whose path is dir, if any.
-func BuiltinFor(dir string) (Builtin, bool) {
-	for _, b := range Builtins() {
-		if SameDir(dir, b.Path) {
-			return b, true
-		}
-	}
-	return Builtin{}, false
-}

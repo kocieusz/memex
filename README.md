@@ -17,9 +17,9 @@ Named after Vannevar Bush's [memex](https://en.wikipedia.org/wiki/Memex), the
 original vision of linked knowledge.
 
 Skills live in one place (`~/.memex/skills` by default) and are linked as
-directory symlinks into any skills directory a harness reads — global or
-per-project. memex only ever creates and removes symlinks that point into the
-library; it never touches real directories or links it doesn't own.
+directory symlinks into the global skills directory of each harness. memex
+only ever creates and removes symlinks that point into the library; it never
+touches real directories or links it doesn't own.
 
 ## Install
 
@@ -43,8 +43,8 @@ memex clone anthropics/skills               # pick skills from a repo, copy them
 memex adopt ~/.agents/skills/some-skill     # move a real skill dir into the library, symlink back
 ```
 
-Then run `memex` inside any skills directory (or a project containing one) to
-get an interactive checklist — space toggles a skill, enter applies:
+Then run `memex` to pick a harness target (claude, codex, pi, agents) and get
+an interactive checklist — space toggles a skill, enter applies:
 
 ```
   Target: ~/.claude/skills          Source: ~/.memex/skills (2 skills)
@@ -55,24 +55,16 @@ get an interactive checklist — space toggles a skill, enter applies:
   ↑/↓ move · space toggle · a all · n none · / filter · enter apply · q quit
 ```
 
-Run it outside a skills directory to pick a global harness target (claude,
-codex, pi, agents) — all linking and unlinking happens through the TUI. After
-applying (or backing out with `q`), you return to the picker, so several
-harnesses can be updated in one session. Inside a project, `memex global`
-skips the project's own skills dirs and goes straight to the global targets.
-
-When the target lives inside a project's git repo, memex maintains a
-`.gitignore` next to the symlinks: linked skills are added (they point into
-your home dir and would be broken for collaborators) and removed again on
-unlink, deleting the file once nothing else remains in it.
+After applying (or backing out with `q`), you return to the picker, so
+several harnesses can be updated in one session.
 
 Inspect without the TUI:
 
 ```sh
-memex ls --target claude                    # linked/available/broken skills
+memex ls                                    # your library, with each skill's origin repo
+memex ls --target claude                    # linked/available/broken skills in a target
 memex ls -a --target claude                 # also native dirs and foreign links
 memex ls --target claude --json
-memex ls                                    # in a skills dir: that dir; in the library: all your skills
 ```
 
 Keep things healthy:
@@ -85,8 +77,15 @@ memex doctor --fix                          # remove broken links, report missin
 and opens a checklist to pick the ones to copy; each row shows the skill's
 path inside the repo, and `i` reveals its description. It also takes full
 clone URLs and GitHub `/tree/<branch>[/dir]` links; `--branch` picks a branch
-explicitly (needed for branch names containing `/`). Skills whose name
-already exists in the library are shown but can't be selected.
+explicitly (needed for branch names containing `/`).
+
+memex records where each copied skill came from — repo, path, and a content
+hash — in `.origins.toml` next to the skills. Re-running `memex clone` on the
+same repo shows unchanged skills as `up to date` and changed ones as
+selectable updates, with a warning when you've edited your copy locally
+(updating overwrites it). Skills that came from anywhere else can't be
+selected; that includes skills copied before memex tracked origins — re-add
+them once to start tracking.
 
 ## Configuration
 

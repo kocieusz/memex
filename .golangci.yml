@@ -1,6 +1,8 @@
 version: "2"
 
 linters:
+  enable:
+    - modernize
   settings:
     errcheck:
       # Best-effort calls whose errors carry no useful action: closing

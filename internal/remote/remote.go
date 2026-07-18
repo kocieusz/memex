@@ -200,3 +200,13 @@ func Copy(s Skill, libraryDir string) error {
 	}
 	return os.CopyFS(dest, os.DirFS(s.Path))
 }
+
+// Update replaces libraryDir/s.Name with the clone's version of s. The dir is
+// recreated at the same path, so target symlinks pointing at it stay valid.
+func Update(s Skill, libraryDir string) error {
+	dest := filepath.Join(libraryDir, s.Name)
+	if err := os.RemoveAll(dest); err != nil {
+		return err
+	}
+	return os.CopyFS(dest, os.DirFS(s.Path))
+}
