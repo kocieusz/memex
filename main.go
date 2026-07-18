@@ -27,8 +27,7 @@ type cli struct {
 	Version kong.VersionFlag `help:"Print version and exit."`
 
 	Manage manageCmd `cmd:"" default:"1" hidden:""`
-	Global globalCmd `cmd:"" help:"Manage the global harness targets (~/.claude, ~/.codex, …)."`
-	Ls     listCmd   `cmd:"" aliases:"list" help:"List skill states for a target."`
+	Ls     listCmd   `cmd:"" aliases:"list" help:"List library skills, or a target's skill states."`
 	Adopt  adoptCmd  `cmd:"" help:"Move a real skill directory into the library and leave a symlink."`
 	Clone  cloneCmd  `cmd:"" help:"Pick skills from a git repo and copy them into the library."`
 	Touch  newCmd    `cmd:"" aliases:"new" help:"Scaffold a new skill in the library."`
@@ -190,29 +189,7 @@ func applyPlan(targetDir, source string, skills []library.Skill, plan tui.Plan) 
 		}
 		fmt.Printf("unlinked %s\n", name)
 	}
-	updateIgnore(targetDir, plan)
 	return nil
-}
-
-// updateIgnore keeps targetDir/.gitignore in sync with the plan when the
-// target sits inside a project repo: the symlinks point into this machine's
-// home dir and would be broken for anyone else cloning the project.
-func updateIgnore(targetDir string, plan tui.Plan) {
-	if _, ok := target.GitDir(targetDir); !ok {
-		return
-	}
-	file := filepath.Join(targetDir, ".gitignore")
-	added, err := target.AddIgnore(targetDir, plan.Link)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to update %s: %v\n", file, err)
-	}
-	removed, err := target.RemoveIgnore(targetDir, plan.Unlink)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to update %s: %v\n", file, err)
-	}
-	if added || removed {
-		fmt.Printf("updated  %s\n", file)
-	}
 }
 
 func confirm(prompt string) bool {
@@ -224,49 +201,21 @@ func confirm(prompt string) bool {
 
 type manageCmd struct{}
 
-// Run picks a target for the bare `memex` invocation: the CWD when it is a
-// skills dir, a harness dir found under the CWD, or an interactive picker.
+// Run opens the global target picker — the only linking flow memex has.
 func (m *manageCmd) Run(c *cli) error {
-	cwd, err := os.Getwd()
-	if err != nil {
-		return err
-	}
-	// The library itself is not a target — fall through to the picker.
-	if source, err := c.sourceDir(); err == nil && target.SameDir(cwd, source) {
-		return pickLoop(c, nil)
-	}
-	if isSkillsDir(cwd) {
-		_, err := c.manage(cwd, false)
-		return err
-	}
-
-	options := harnessDirsUnder(cwd)
-	if len(options) == 1 {
-		_, err := c.manage(options[0].Path, false)
-		return err
-	}
-	return pickLoop(c, options)
+	return pickLoop(c)
 }
 
-type globalCmd struct{}
-
-// Run manages the global harness targets even when the CWD has project
-// skills dirs that bare `memex` would prefer.
-func (g *globalCmd) Run(c *cli) error {
-	return pickLoop(c, nil)
-}
-
-// pickLoop offers options (falling back to the global targets) and manages the
-// chosen one, returning to the picker afterwards so several targets can be
-// handled in one session.
-func pickLoop(c *cli, options []tui.Option) error {
+// pickLoop offers the global harness targets and manages the chosen one,
+// returning to the picker afterwards so several targets can be handled in one
+// session.
+func pickLoop(c *cli) error {
+	var options []tui.Option
+	for _, b := range target.Builtins() {
+		options = append(options, tui.Option{Label: b.Name, Path: b.Path})
+	}
 	if len(options) == 0 {
-		for _, b := range target.Builtins() {
-			options = append(options, tui.Option{Label: b.Name, Path: b.Path})
-		}
-		if len(options) == 0 {
-			return fmt.Errorf("no skills directory found here and no global targets present")
-		}
+		return fmt.Errorf("no global targets present (looked for ~/.claude, ~/.codex, ~/.pi, ~/.agents)")
 	}
 	for {
 		opt, ok, err := tui.Pick("Pick a target", options)
@@ -280,53 +229,21 @@ func pickLoop(c *cli, options []tui.Option) error {
 	}
 }
 
-func isSkillsDir(dir string) bool {
-	if filepath.Base(dir) == "skills" {
-		return true
-	}
-	_, ok := target.BuiltinFor(dir)
-	return ok
-}
-
-// harnessDirsUnder returns the harness skills dirs that exist under dir.
-func harnessDirsUnder(dir string) []tui.Option {
-	var options []tui.Option
-	for _, sub := range []string{".claude/skills", ".codex/skills", ".agents/skills"} {
-		path := filepath.Join(dir, sub)
-		if fi, err := os.Stat(path); err == nil && fi.IsDir() {
-			options = append(options, tui.Option{Label: sub, Path: path})
-		}
-	}
-	return options
-}
-
 type listCmd struct {
-	Target string `help:"Target name or path (default: detected from the current directory)."`
+	Target string `help:"Target name (claude, codex, …) or path. Without it, the library is listed."`
 	All    bool   `short:"a" help:"Also list entries not managed by memex (native dirs, foreign links)."`
 	JSON   bool   `help:"Emit JSON."`
 }
 
-// listTarget resolves the directory to list: an explicit --target, the CWD
-// when it is a skills dir, or the single harness dir under the CWD.
-func (l *listCmd) listTarget() (string, error) {
-	if l.Target != "" {
-		return target.Resolve(l.Target)
-	}
-	cwd, err := os.Getwd()
-	if err != nil {
-		return "", err
-	}
-	if isSkillsDir(cwd) {
-		return cwd, nil
-	}
-	if options := harnessDirsUnder(cwd); len(options) == 1 {
-		return options[0].Path, nil
-	}
-	return "", fmt.Errorf("%s is not a skills directory — pass --target (a name like claude, or a path)", cwd)
-}
-
 func (l *listCmd) Run(c *cli) error {
-	dir, err := l.listTarget()
+	if l.Target == "" {
+		source, err := c.sourceDir()
+		if err != nil {
+			return err
+		}
+		return l.listLibrary(source)
+	}
+	dir, err := target.Resolve(l.Target)
 	if err != nil {
 		return err
 	}
