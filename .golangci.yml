@@ -1,0 +1,11 @@
+version: "2"
+
+linters:
+  settings:
+    errcheck:
+      # Best-effort calls whose errors carry no useful action: closing
+      # read-only files, cleaning up temp dirs, printing to a buffer/stdout.
+      exclude-functions:
+        - (*os.File).Close
+        - os.RemoveAll
+        - fmt.Fprintln
