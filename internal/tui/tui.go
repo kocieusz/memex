@@ -215,6 +215,9 @@ func footer(items ...[2]string) string {
 	return "  " + strings.Join(parts, helpStyle.Render(" · "))
 }
 
+// Dim renders s in the faint style, for secondary detail in plain output.
+func Dim(s string) string { return dimStyle.Render(s) }
+
 // LibraryBadge is the badge for skills listed from the library itself.
 func LibraryBadge() string {
 	return headStyle.Render(fmt.Sprintf("%-10s", "library"))

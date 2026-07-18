@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strings"
 
 	"github.com/alecthomas/kong"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/kocieusz/memex/internal/config"
 	"github.com/kocieusz/memex/internal/library"
+	"github.com/kocieusz/memex/internal/origin"
 	"github.com/kocieusz/memex/internal/remote"
 	"github.com/kocieusz/memex/internal/target"
 	"github.com/kocieusz/memex/internal/tui"
@@ -289,10 +291,13 @@ func (l *listCmd) Run(c *cli) error {
 	return nil
 }
 
-// listLibrary lists the library's own skills — the degenerate case where the
-// target is the library itself.
+// listLibrary lists the library's own skills with their clone origins.
 func (l *listCmd) listLibrary(source string) error {
 	skills, err := library.Scan(source)
+	if err != nil {
+		return err
+	}
+	origins, err := origin.Load(source)
 	if err != nil {
 		return err
 	}
@@ -300,19 +305,41 @@ func (l *listCmd) listLibrary(source string) error {
 		type jsonSkill struct {
 			Name  string `json:"name"`
 			State string `json:"state"`
+			Repo  string `json:"repo,omitempty"`
+			Path  string `json:"path,omitempty"`
+			Hash  string `json:"hash,omitempty"`
 		}
 		out := make([]jsonSkill, len(skills))
 		for i, s := range skills {
-			out[i] = jsonSkill{s.Name, "library"}
+			o := origins[s.Name]
+			out[i] = jsonSkill{s.Name, "library", o.Repo, o.Path, o.Hash}
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
 		return enc.Encode(out)
 	}
+	nameW := 0
 	for _, s := range skills {
-		fmt.Printf("%s %s\n", tui.LibraryBadge(), s.Name)
+		nameW = max(nameW, len(s.Name))
+	}
+	for _, s := range skills {
+		extra := ""
+		if o, ok := origins[s.Name]; ok {
+			extra = "  " + tui.Dim("from "+shortRepo(o.Repo))
+		}
+		fmt.Printf("%s %-*s%s\n", tui.LibraryBadge(), nameW, s.Name, extra)
 	}
 	return nil
+}
+
+// shortRepo compresses a github.com clone URL to owner/repo for display.
+func shortRepo(url string) string {
+	for _, p := range []string{"https://github.com/", "http://github.com/", "git@github.com:"} {
+		if strings.HasPrefix(url, p) {
+			return strings.TrimSuffix(strings.TrimPrefix(url, p), ".git")
+		}
+	}
+	return url
 }
 
 type adoptCmd struct {
@@ -405,22 +432,13 @@ func (cl *cloneCmd) Run(c *cli) error {
 	if err != nil {
 		return err
 	}
-	inLib := make(map[string]bool, len(skills))
-	for _, s := range skills {
-		inLib[s.Name] = true
+	origins, err := origin.Load(source)
+	if err != nil {
+		return err
 	}
-	items := make([]tui.MultiItem, len(found))
-	seen := map[string]string{} // name → rel of the first occurrence in the repo
-	for i, f := range found {
-		items[i] = tui.MultiItem{Name: f.Name, Note: f.Rel, Desc: f.Description}
-		switch {
-		case inLib[f.Name]:
-			items[i].Conflict = "already in the library"
-		case seen[f.Name] != "":
-			items[i].Conflict = "duplicate name — see " + seen[f.Name]
-		default:
-			seen[f.Name] = f.Rel
-		}
+	items, updates, hashes, err := classifyClone(found, skills, source, origins, ref.URL)
+	if err != nil {
+		return err
 	}
 
 	sel, ok, err := tui.MultiSelect("Skills in "+cl.Repo, items)
@@ -432,13 +450,71 @@ func (cl *cloneCmd) Run(c *cli) error {
 		return nil
 	}
 	for _, i := range sel {
-		if err := remote.Copy(found[i], source); err != nil {
+		f := found[i]
+		verb := "copied"
+		if updates[i] {
+			verb = "updated"
+			err = remote.Update(f, source)
+		} else {
+			err = remote.Copy(f, source)
+		}
+		if err != nil {
 			return err
 		}
-		fmt.Printf("copied   %s\n", found[i].Name)
+		origins[f.Name] = origin.Origin{Repo: ref.URL, Path: f.Rel, Hash: hashes[i]}
+		fmt.Printf("%-8s %s\n", verb, f.Name)
+	}
+	if err := origin.Save(source, origins); err != nil {
+		return err
 	}
 	fmt.Println("run `memex` to link them into a harness")
 	return nil
+}
+
+// classifyClone builds the picker rows for the skills found in a clone. Rows
+// colliding with the library are unselectable — except when the library copy
+// was cloned from this same repo and upstream changed, which becomes a
+// selectable update. Returns the rows, an is-update flag per row, and the
+// upstream content hash per row.
+func classifyClone(found []remote.Skill, skills []library.Skill, source string, origins map[string]origin.Origin, repoURL string) ([]tui.MultiItem, []bool, []string, error) {
+	inLib := make(map[string]bool, len(skills))
+	for _, s := range skills {
+		inLib[s.Name] = true
+	}
+	items := make([]tui.MultiItem, len(found))
+	updates := make([]bool, len(found))
+	hashes := make([]string, len(found))
+	seen := map[string]string{} // name → rel of the first selectable occurrence
+	for i, f := range found {
+		items[i] = tui.MultiItem{Name: f.Name, Note: f.Rel, Desc: f.Description}
+		hash, err := origin.HashDir(f.Path)
+		if err != nil {
+			return nil, nil, nil, err
+		}
+		hashes[i] = hash
+		o, tracked := origins[f.Name]
+		switch {
+		case seen[f.Name] != "":
+			items[i].Conflict = "duplicate name — see " + seen[f.Name]
+		case inLib[f.Name] && tracked && o.Repo == repoURL:
+			if hash == o.Hash {
+				items[i].Conflict = "up to date"
+				break
+			}
+			updates[i] = true
+			note := "update available"
+			if localHash, err := origin.HashDir(filepath.Join(source, f.Name)); err == nil && localHash != o.Hash {
+				note = "update — overwrites local edits"
+			}
+			items[i].Note = f.Rel + "  · " + note
+			seen[f.Name] = f.Rel
+		case inLib[f.Name]:
+			items[i].Conflict = "already in the library"
+		default:
+			seen[f.Name] = f.Rel
+		}
+	}
+	return items, updates, hashes, nil
 }
 
 type newCmd struct {
@@ -484,6 +560,32 @@ func (d *doctorCmd) Run(c *cli) error {
 		if _, err := os.Stat(filepath.Join(source, e.Name(), "SKILL.md")); err != nil {
 			fmt.Printf("library: %s has no SKILL.md\n", e.Name())
 			problems++
+		}
+	}
+
+	origins, err := origin.Load(source)
+	if err != nil {
+		return err
+	}
+	var stale []string
+	for name := range origins {
+		if _, err := os.Lstat(filepath.Join(source, name)); err != nil {
+			stale = append(stale, name)
+		}
+	}
+	sort.Strings(stale)
+	for _, name := range stale {
+		problems++
+		if d.Fix {
+			delete(origins, name)
+			fmt.Printf("library: pruned origin entry for missing skill %s\n", name)
+		} else {
+			fmt.Printf("library: origin entry for missing skill %s\n", name)
+		}
+	}
+	if d.Fix && len(stale) > 0 {
+		if err := origin.Save(source, origins); err != nil {
+			return err
 		}
 	}
 

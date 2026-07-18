@@ -77,8 +77,15 @@ memex doctor --fix                          # remove broken links, report missin
 and opens a checklist to pick the ones to copy; each row shows the skill's
 path inside the repo, and `i` reveals its description. It also takes full
 clone URLs and GitHub `/tree/<branch>[/dir]` links; `--branch` picks a branch
-explicitly (needed for branch names containing `/`). Skills whose name
-already exists in the library are shown but can't be selected.
+explicitly (needed for branch names containing `/`).
+
+memex records where each copied skill came from — repo, path, and a content
+hash — in `.origins.toml` next to the skills. Re-running `memex clone` on the
+same repo shows unchanged skills as `up to date` and changed ones as
+selectable updates, with a warning when you've edited your copy locally
+(updating overwrites it). Skills that came from anywhere else can't be
+selected; that includes skills copied before memex tracked origins — re-add
+them once to start tracking.
 
 ## Configuration
 
