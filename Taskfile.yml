@@ -1,0 +1,31 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+tasks:
+  default:
+    desc: List available tasks
+    cmds:
+      - task --list
+    silent: true
+
+  build:
+    desc: Build memex into bin/
+    cmds:
+      - go build -o bin/memex .
+    sources:
+      - ./**/*.go
+      - go.mod
+      - go.sum
+    generates:
+      - bin/memex
+
+  test:
+    desc: Run the test suite
+    cmds:
+      - go test ./...
+
+  tidy:
+    desc: Tidy Go module files
+    cmds:
+      - go mod tidy
