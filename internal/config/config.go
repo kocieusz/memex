@@ -1,5 +1,5 @@
 // Package config loads the memex config file, a small TOML file at
-// $XDG_CONFIG_HOME/memex/config.toml (~/.config/memex/config.toml by default).
+// ~/.memex/config.toml — alongside the default library, ~/.memex/skills.
 package config
 
 import (
@@ -16,16 +16,13 @@ type Config struct {
 	Library string `toml:"library"`
 }
 
-// Path returns the config file location, honouring XDG_CONFIG_HOME.
+// Path returns the config file location, ~/.memex/config.toml.
 func Path() (string, error) {
-	if dir := os.Getenv("XDG_CONFIG_HOME"); dir != "" {
-		return filepath.Join(dir, "memex", "config.toml"), nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "memex", "config.toml"), nil
+	return filepath.Join(home, ".memex", "config.toml"), nil
 }
 
 // Load reads the config file. A missing file is not an error and yields the
