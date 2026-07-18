@@ -335,8 +335,8 @@ func (l *listCmd) listLibrary(source string) error {
 // shortRepo compresses a github.com clone URL to owner/repo for display.
 func shortRepo(url string) string {
 	for _, p := range []string{"https://github.com/", "http://github.com/", "git@github.com:"} {
-		if strings.HasPrefix(url, p) {
-			return strings.TrimSuffix(strings.TrimPrefix(url, p), ".git")
+		if after, ok := strings.CutPrefix(url, p); ok {
+			return strings.TrimSuffix(after, ".git")
 		}
 	}
 	return url
