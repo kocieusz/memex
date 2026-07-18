@@ -9,18 +9,18 @@ import (
 
 func write(t *testing.T, content string) {
 	t.Helper()
-	dir := t.TempDir()
-	t.Setenv("XDG_CONFIG_HOME", dir)
-	if err := os.MkdirAll(filepath.Join(dir, "memex"), 0o755); err != nil {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	if err := os.MkdirAll(filepath.Join(home, ".memex"), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(dir, "memex", "config.toml"), []byte(content), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(home, ".memex", "config.toml"), []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }
 
 func TestLoadMissingFile(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	t.Setenv("HOME", t.TempDir())
 	c, err := Load()
 	if err != nil {
 		t.Fatalf("missing file should not error: %v", err)
@@ -56,13 +56,13 @@ func TestLoadUnknownKey(t *testing.T) {
 	}
 }
 
-func TestPathXDG(t *testing.T) {
-	t.Setenv("XDG_CONFIG_HOME", "/custom")
+func TestPath(t *testing.T) {
+	t.Setenv("HOME", "/custom")
 	p, err := Path()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if p != "/custom/memex/config.toml" {
+	if p != "/custom/.memex/config.toml" {
 		t.Errorf("Path = %q", p)
 	}
 }

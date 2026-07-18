@@ -91,8 +91,7 @@ already exists in the library are shown but can't be selected.
 ## Configuration
 
 The library defaults to `~/.memex/skills`. To keep it somewhere else — say, in
-your dotfiles repo — point memex at it in `~/.config/memex/config.toml`
-(`$XDG_CONFIG_HOME` is honoured):
+your dotfiles repo — point memex at it in `~/.memex/config.toml`:
 
 ```toml
 library = "~/.dotfiles/skills"
