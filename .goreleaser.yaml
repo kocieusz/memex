@@ -1,0 +1,43 @@
+# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
+
+version: 2
+
+project_name: memex
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [darwin, linux]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w -X main.buildVersion={{ .Version }}
+
+# The archive and checksum names are a contract: install.sh and `memex upgrade`
+# both construct them from the version, OS and arch. Changing them breaks
+# upgrades from every already-installed binary.
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^ci:"
+      - "^chore:"
+      - "^build\\(deps\\):"
+
+release:
+  footer: |
+    ## Install
+
+    ```sh
+    curl -fsSL https://raw.githubusercontent.com/kocieusz/memex/main/install.sh | sh
+    ```
+
+    Already have it? `memex upgrade`.

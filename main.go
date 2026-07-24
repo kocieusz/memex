@@ -5,13 +5,16 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"runtime/debug"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/charmbracelet/lipgloss"
@@ -19,6 +22,7 @@ import (
 	"github.com/kocieusz/memex/internal/config"
 	"github.com/kocieusz/memex/internal/library"
 	"github.com/kocieusz/memex/internal/origin"
+	"github.com/kocieusz/memex/internal/release"
 	"github.com/kocieusz/memex/internal/remote"
 	"github.com/kocieusz/memex/internal/target"
 	"github.com/kocieusz/memex/internal/tui"
@@ -28,12 +32,13 @@ type cli struct {
 	Source  string           `help:"Skill library directory (overrides the config file; default ~/.memex/skills)." env:"MEMEX_SOURCE" placeholder:"DIR"`
 	Version kong.VersionFlag `help:"Print version and exit."`
 
-	Manage manageCmd `cmd:"" default:"1" hidden:""`
-	Ls     listCmd   `cmd:"" aliases:"list" help:"List library skills, or a target's skill states."`
-	Adopt  adoptCmd  `cmd:"" help:"Move a real skill directory into the library and leave a symlink."`
-	Clone  cloneCmd  `cmd:"" help:"Pick skills from a git repo and copy them into the library."`
-	Touch  newCmd    `cmd:"" aliases:"new" help:"Scaffold a new skill in the library."`
-	Doctor doctorCmd `cmd:"" help:"Check targets and library for problems."`
+	Manage  manageCmd  `cmd:"" default:"1" hidden:""`
+	Ls      listCmd    `cmd:"" aliases:"list" help:"List library skills, or a target's skill states."`
+	Adopt   adoptCmd   `cmd:"" help:"Move a real skill directory into the library and leave a symlink."`
+	Clone   cloneCmd   `cmd:"" help:"Pick skills from a git repo and copy them into the library."`
+	Touch   newCmd     `cmd:"" aliases:"new" help:"Scaffold a new skill in the library."`
+	Doctor  doctorCmd  `cmd:"" help:"Check targets and library for problems."`
+	Upgrade upgradeCmd `cmd:"" aliases:"update" help:"Update memex to the latest release."`
 }
 
 func main() {
@@ -48,9 +53,16 @@ func main() {
 	ctx.FatalIfErrorf(ctx.Run(&c))
 }
 
-// version reports the module version stamped into `go install` builds; local
-// source builds show (devel).
+// buildVersion is stamped in by goreleaser (-X main.buildVersion=…). It's empty
+// in `go install` and local builds, which fall back to the module version.
+var buildVersion string
+
+// version reports the release this binary came from: the goreleaser tag for
+// release builds, the module version for `go install` builds, else (devel).
 func version() string {
+	if buildVersion != "" {
+		return buildVersion
+	}
 	if bi, ok := debug.ReadBuildInfo(); ok && bi.Main.Version != "" {
 		return bi.Main.Version
 	}
@@ -616,4 +628,77 @@ func (d *doctorCmd) Run(c *cli) error {
 		fmt.Println("\nrun `memex doctor --fix` to remove broken links")
 	}
 	return nil
+}
+
+type upgradeCmd struct {
+	Check bool `help:"Report whether a newer release exists without installing it."`
+}
+
+// Run replaces the running binary with the latest release. It's a no-op when
+// already current, and refuses to touch a binary built with `go install`,
+// where `go install …@latest` is the right way to update.
+func (u *upgradeCmd) Run(c *cli) error {
+	current := version()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	src := release.GitHub()
+	latest, err := src.Latest(ctx)
+	if err != nil {
+		return err
+	}
+	if !release.Newer(current, latest) {
+		fmt.Printf("memex %s is already the latest release\n", current)
+		return nil
+	}
+	fmt.Printf("%s → %s\n", current, latest)
+	if u.Check {
+		fmt.Println("run `memex upgrade` to install it")
+		return nil
+	}
+
+	self, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	if self, err = filepath.EvalSymlinks(self); err != nil {
+		return err
+	}
+	if inGoBin(self) {
+		return fmt.Errorf("this memex was installed with `go install`; update it with:\n    go install github.com/%s@latest", release.Repo)
+	}
+
+	fmt.Printf("downloading %s…\n", release.AssetName(latest, runtime.GOOS, runtime.GOARCH))
+	bin, err := src.Binary(ctx, latest, runtime.GOOS, runtime.GOARCH)
+	if err != nil {
+		return err
+	}
+	if err := release.Replace(self, bin); err != nil {
+		return err
+	}
+	fmt.Printf("upgraded memex to %s\n", latest)
+	return nil
+}
+
+// inGoBin reports whether path lives under the Go install bin dir, where a
+// self-replace would fight with the go toolchain.
+func inGoBin(path string) bool {
+	if gobin := os.Getenv("GOBIN"); gobin != "" {
+		if rel, err := filepath.Rel(gobin, path); err == nil && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+	if gopath := os.Getenv("GOPATH"); gopath != "" {
+		for _, p := range filepath.SplitList(gopath) {
+			if rel, err := filepath.Rel(filepath.Join(p, "bin"), path); err == nil && !strings.HasPrefix(rel, "..") {
+				return true
+			}
+		}
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		if rel, err := filepath.Rel(filepath.Join(home, "go", "bin"), path); err == nil && !strings.HasPrefix(rel, "..") {
+			return true
+		}
+	}
+	return false
 }

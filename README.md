@@ -23,14 +23,69 @@ touches real directories or links it doesn't own.
 
 ## Install
 
-Requires Go 1.26+:
+```sh
+curl -fsSL https://raw.githubusercontent.com/kocieusz/memex/main/install.sh | sh
+```
+
+That's it — no Go toolchain required. The script:
+
+1. detects your OS and CPU (macOS and Linux, arm64 and amd64) and downloads the
+   matching binary from the [latest release](https://github.com/kocieusz/memex/releases/latest);
+2. verifies it against the release's `checksums.txt` before installing;
+3. installs a single binary at `~/.memex/bin/memex`, keeping memex self-contained
+   alongside its library (`~/.memex/skills`) and config (`~/.memex/config.toml`);
+4. adds `~/.memex/bin` to your `PATH` by appending this to your shell startup
+   file (`~/.zshrc` for zsh, `~/.bash_profile` / `~/.bashrc` for bash):
+
+   ```sh
+   # added by memex install.sh
+   export PATH="/Users/you/.memex/bin:$PATH"
+   ```
+
+   Then open a new terminal (or `source` that file) so the change takes effect.
+
+If another `memex` is found earlier on your `PATH` — typically a leftover
+`~/go/bin/memex` from a previous `go install` — the script warns you and tells
+you how to remove it, so the old copy can't shadow the new one.
+
+**Options** (environment variables):
+
+| Variable | Effect |
+| --- | --- |
+| `MEMEX_INSTALL_DIR=~/.local/bin` | Install to a different directory (e.g. one already on your `PATH`). |
+| `MEMEX_VERSION=v0.3.0` | Install a specific release instead of the latest. |
+| `MEMEX_NO_MODIFY_PATH=1` | Don't touch your shell startup file; just print the `PATH` line to add yourself. |
+
+### Updating
+
+```sh
+memex upgrade            # download the latest release and replace this binary
+memex upgrade --check    # just report whether a newer release is available
+```
+
+`upgrade` verifies the checksum and swaps the running binary in place with an
+atomic rename — there's never a stale second copy left behind, and an
+interrupted upgrade leaves the working binary untouched. Run it any time.
+
+### Install from source
+
+If you have Go 1.26+ and prefer to build it yourself (or you're on an OS/arch
+without a prebuilt binary):
 
 ```sh
 go install github.com/kocieusz/memex@latest
 ```
 
-The binary lands in `$(go env GOPATH)/bin` (usually `~/go/bin`) — make sure
-that's on your `PATH`.
+The binary lands in `$(go env GOPATH)/bin` (usually `~/go/bin`), which is **not
+on your `PATH` by default** — add it if `memex` isn't found:
+
+```sh
+export PATH="$(go env GOPATH)/bin:$PATH"    # in ~/.zshrc
+```
+
+A `go install` build updates with `go install …@latest`, not `memex upgrade` —
+the latter detects this case and points you back to the `go` command rather
+than fighting the toolchain.
 
 ## Usage
 

@@ -27,4 +27,7 @@ go.work.sum
 # local build output
 bin/
 
+# goreleaser output
+dist/
+
 .DS_Store
