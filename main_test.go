@@ -37,11 +37,11 @@ func TestClassifyClone(t *testing.T) {
 	clone := t.TempDir()
 	lib := t.TempDir()
 
-	newDir := mkSkill(t, clone, "new-skill", "new")                // only in the clone
-	sameDir := mkSkill(t, clone, "same-skill", "same")             // tracked, upstream unchanged
-	mkSkill(t, lib, "same-skill", "same")                          //
-	chgDir := mkSkill(t, clone, "changed-skill", "v2")             // tracked, upstream changed
-	chgLib := mkSkill(t, lib, "changed-skill", "v1")               //
+	newDir := mkSkill(t, clone, "new-skill", "new")     // only in the clone
+	sameDir := mkSkill(t, clone, "same-skill", "same")  // tracked, upstream unchanged
+	mkSkill(t, lib, "same-skill", "same")               //
+	chgDir := mkSkill(t, clone, "changed-skill", "v2")  // tracked, upstream changed
+	chgLib := mkSkill(t, lib, "changed-skill", "v1")    //
 	editDir := mkSkill(t, clone, "edited-skill", "v2")  // tracked, upstream changed + local edits
 	mkSkill(t, lib, "edited-skill", "v1 plus my edits") //
 	dupDir := mkSkill(t, clone, "native-skill", "x")    // in the library without an origin

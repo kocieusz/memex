@@ -9,5 +9,11 @@ linters:
       # read-only files, cleaning up temp dirs, printing to a buffer/stdout.
       exclude-functions:
         - (*os.File).Close
+        - (io.Closer).Close
+        - (*compress/gzip.Reader).Close
+        - os.Remove
         - os.RemoveAll
+        - fmt.Fprint
         - fmt.Fprintln
+        - fmt.Fprintf
+        - (net/http.ResponseWriter).Write
