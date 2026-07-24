@@ -146,6 +146,14 @@ main() {
 	mv -f "$dir/.$BIN.new" "$dir/$BIN"
 
 	say "installed $BIN $tag to $dir/$BIN"
+
+	# Always ensure the default skill library exists so `memex` has somewhere to
+	# link from on a fresh machine, no matter where the binary was installed.
+	library="$HOME/.memex/skills"
+	if mkdir -p "$library" 2>/dev/null; then
+		say "skill library ready at $library"
+	fi
+
 	PATH_HINT=""
 	ensure_path "$dir"
 	warn_duplicates "$dir/$BIN"
