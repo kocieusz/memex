@@ -34,7 +34,9 @@ That's it — no Go toolchain required. The script:
 2. verifies it against the release's `checksums.txt` before installing;
 3. installs a single binary at `~/.memex/bin/memex`, keeping memex self-contained
    alongside its library (`~/.memex/skills`) and config (`~/.memex/config.toml`);
-4. adds `~/.memex/bin` to your `PATH` by appending this to your shell startup
+4. creates the default skill library at `~/.memex/skills` if it doesn't exist,
+   so `memex` has somewhere to work from immediately;
+5. adds `~/.memex/bin` to your `PATH` by appending this to your shell startup
    file (`~/.zshrc` for zsh, `~/.bash_profile` / `~/.bashrc` for bash):
 
    ```sh
