@@ -22,6 +22,8 @@ import (
 	"github.com/kocieusz/memex/internal/config"
 	"github.com/kocieusz/memex/internal/library"
 	"github.com/kocieusz/memex/internal/origin"
+	"github.com/kocieusz/memex/internal/plan"
+	"github.com/kocieusz/memex/internal/project"
 	"github.com/kocieusz/memex/internal/release"
 	"github.com/kocieusz/memex/internal/remote"
 	"github.com/kocieusz/memex/internal/target"
@@ -32,13 +34,18 @@ type cli struct {
 	Source  string           `help:"Skill library directory (overrides the config file; default ~/.memex/skills)." env:"MEMEX_SOURCE" placeholder:"DIR"`
 	Version kong.VersionFlag `help:"Print version and exit."`
 
-	Manage  manageCmd  `cmd:"" default:"1" hidden:""`
-	Ls      listCmd    `cmd:"" aliases:"list" help:"List library skills, or a target's skill states."`
-	Adopt   adoptCmd   `cmd:"" help:"Move a real skill directory into the library and leave a symlink."`
-	Clone   cloneCmd   `cmd:"" help:"Pick skills from a git repo and copy them into the library."`
-	Touch   newCmd     `cmd:"" aliases:"new" help:"Scaffold a new skill in the library."`
-	Doctor  doctorCmd  `cmd:"" help:"Check targets and library for problems."`
-	Upgrade upgradeCmd `cmd:"" aliases:"update" help:"Update memex to the latest release."`
+	Manage    manageCmd    `cmd:"" default:"1" hidden:""`
+	Sync      syncCmd      `cmd:"" help:"Re-link the active set into every provider."`
+	Project   projectCmd   `cmd:"" help:"Create, switch, and edit projects — named sets of skills."`
+	Use       useCmd       `cmd:"" help:"Switch to a project and apply it everywhere."`
+	Reset     resetCmd     `cmd:"" help:"Leave the active project and apply the default set."`
+	Providers providersCmd `cmd:"" help:"List providers, or enable and disable them."`
+	Ls        listCmd      `cmd:"" aliases:"list" help:"List library skills, or a target's skill states."`
+	Adopt     adoptCmd     `cmd:"" help:"Move a real skill directory into the library and leave a symlink."`
+	Clone     cloneCmd     `cmd:"" help:"Pick skills from a git repo and copy them into the library."`
+	Touch     newCmd       `cmd:"" aliases:"new" help:"Scaffold a new skill in the library."`
+	Doctor    doctorCmd    `cmd:"" help:"Check providers, projects, and library for problems."`
+	Upgrade   upgradeCmd   `cmd:"" aliases:"update" help:"Update memex to the latest release."`
 }
 
 func main() {
@@ -47,6 +54,9 @@ func main() {
 		kong.Name("memex"),
 		kong.Description("Manage Agent Skills across harnesses with symlinks from one library."),
 		kong.UsageOnError(),
+		// One line per command, and only the next level down: `memex --help`
+		// lists `project`, `memex project --help` lists what it holds.
+		kong.ConfigureHelp(kong.HelpOptions{Compact: true, NoExpandSubcommands: true}),
 		kong.Help(colorHelp),
 		kong.Vars{"version": version()},
 	)
@@ -89,8 +99,13 @@ func colorHelp(options kong.HelpOptions, ctx *kong.Context) error {
 			inCommands = line == "Commands:"
 			fmt.Fprintln(out, headStyle.Render(line))
 		case inCommands && strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   "):
-			name, rest, _ := strings.Cut(line[2:], " ")
-			fmt.Fprintln(out, "  "+cmdStyle.Render(name)+" "+rest)
+			// Compact help is two columns split by run of spaces; tint the whole
+			// command path, which for a subcommand is more than one word.
+			name, rest, found := strings.Cut(line[2:], "  ")
+			if !found {
+				name, rest, _ = strings.Cut(line[2:], " ")
+			}
+			fmt.Fprintln(out, "  "+cmdStyle.Render(name)+"  "+rest)
 		default:
 			fmt.Fprintln(out, line)
 		}
@@ -165,45 +180,207 @@ func (c *cli) scan(targetDir string) (string, []library.Skill, []target.Entry, e
 	return source, skills, entries, err
 }
 
-// manage runs the checklist TUI for targetDir and applies the confirmed plan.
-// quit is true when the user asked to leave the session rather than return to
-// the picker. back shows the ← back hint.
-func (c *cli) manage(targetDir string, back bool) (bool, error) {
-	source, skills, entries, err := c.scan(targetDir)
-	if err != nil {
-		return false, err
-	}
-	plan, quit, err := tui.Run(targetDir, source, entries, back)
-	if err != nil {
-		return quit, err
-	}
-	if plan.Empty() {
-		if !back {
-			fmt.Println("no changes")
-		}
-		return quit, nil
-	}
-	return quit, applyPlan(targetDir, source, skills, plan)
+// session is everything the set-oriented commands work from: the library, the
+// providers memex manages, the stored sets, and what is linked where.
+type session struct {
+	source    string
+	skills    []library.Skill
+	providers []target.Builtin
+	store     project.Store
+	// active is the project in force, or "" when the default set is.
+	active   string
+	statuses []plan.Status
 }
 
-func applyPlan(targetDir, source string, skills []library.Skill, plan tui.Plan) error {
-	byName := map[string]library.Skill{}
-	for _, s := range skills {
-		byName[s.Name] = s
+// open gathers the session. On a machine that has never used projects it seeds
+// the default set from whatever is already linked, so the first apply doesn't
+// unlink the skills you had before projects existed.
+func (c *cli) open() (*session, error) {
+	source, err := c.sourceDir()
+	if err != nil {
+		return nil, err
 	}
-	for _, name := range plan.Link {
-		if err := target.Link(targetDir, byName[name]); err != nil {
-			return err
+	skills, err := library.Scan(source)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return nil, err
+	}
+	providers := target.Enabled(cfg.DisabledProviders)
+	if len(providers) == 0 {
+		return nil, noProvidersErr(cfg.DisabledProviders)
+	}
+	store, err := project.Load(source)
+	if err != nil {
+		return nil, err
+	}
+	active, err := project.Active()
+	if err != nil {
+		return nil, err
+	}
+	if active != "" && !store.Has(active) {
+		fmt.Fprintf(os.Stderr, "warning: active project %q is not in %s — falling back to the default set\n", active, project.File(source))
+		if err := project.SetActive(""); err != nil {
+			return nil, err
 		}
-		fmt.Printf("linked   %s\n", name)
+		active = ""
 	}
-	for _, name := range plan.Unlink {
-		if err := target.Unlink(targetDir, source, name); err != nil {
-			return err
+	statuses, err := plan.Survey(providers, skills)
+	if err != nil {
+		return nil, err
+	}
+	s := &session{source: source, skills: skills, providers: providers, store: store, active: active, statuses: statuses}
+	if !store.Found && active == "" {
+		s.store.SetSkills(project.DefaultName, plan.LinkedNames(statuses))
+	}
+	return s, nil
+}
+
+// noProvidersErr explains an empty provider list — nothing detected, or
+// everything detected disabled.
+func noProvidersErr(disabled []string) error {
+	if len(target.Builtins()) == 0 {
+		return fmt.Errorf("no providers detected (looked for ~/.claude, ~/.codex, ~/.pi, ~/.agents)")
+	}
+	return fmt.Errorf("every detected provider is disabled (%s) — enable one with `memex providers enable <name>`", strings.Join(disabled, ", "))
+}
+
+// setName is the name of the set in force: the active project, or "default".
+func (s *session) setName() string {
+	if s.active == "" {
+		return project.DefaultName
+	}
+	return s.active
+}
+
+func (s *session) providerNames() []string { return target.Names(s.providers) }
+
+// rows builds the checklist for a set: every library skill, plus any name the
+// set holds that the library no longer has.
+func (s *session) rows(want []string) []tui.Row {
+	inSet := make(map[string]bool, len(want))
+	for _, n := range want {
+		inSet[n] = true
+	}
+	rows := make([]tui.Row, 0, len(s.statuses))
+	for _, st := range s.statuses {
+		r := tui.Row{Name: st.Skill.Name, InSet: inSet[st.Skill.Name], LinkedIn: st.LinkedIn}
+		for _, b := range st.Blocked {
+			r.Blocked = append(r.Blocked, tui.Blocker{Provider: b.Provider, Reason: b.Reason})
 		}
-		fmt.Printf("unlinked %s\n", name)
+		rows = append(rows, r)
+		delete(inSet, st.Skill.Name)
 	}
+	missing := make([]string, 0, len(inSet))
+	for name := range inSet {
+		missing = append(missing, name)
+	}
+	sort.Strings(missing)
+	for _, name := range missing {
+		rows = append(rows, tui.Row{Name: name, InSet: true, Missing: true})
+	}
+	return rows
+}
+
+// edit runs the checklist for the named set and saves what the user confirms.
+// The set is only linked into the providers when it is the one in force.
+func (s *session) edit(name string) error {
+	live := name == s.setName()
+	model := tui.NewModel(name, shortHome(s.source), s.providerNames(), s.rows(s.store.Skills(name)))
+	model.Live = live
+	final, err := tui.Run(model)
+	if err != nil {
+		return err
+	}
+	if !final.Accepted {
+		fmt.Println("no changes")
+		return nil
+	}
+	return s.save(name, final.Set())
+}
+
+// save stores a set and, when it is the one in force, brings every provider in
+// line with it.
+func (s *session) save(name string, want []string) error {
+	s.store.SetSkills(name, want)
+	if err := project.Save(s.source, s.store); err != nil {
+		return err
+	}
+	s.store.Found = true
+	if name != s.setName() {
+		fmt.Printf("saved project %s (%s)\n", name, plural(len(want), "skill"))
+		return nil
+	}
+	return s.sync()
+}
+
+// sync applies the set in force to every provider.
+func (s *session) sync() error {
+	want := s.store.Skills(s.setName())
+	p := plan.Build(s.providers, s.statuses, want)
+	for _, name := range p.Missing {
+		fmt.Fprintf(os.Stderr, "warning: %s names %q, which is not in the library\n", s.setName(), name)
+	}
+	for _, b := range p.Blocked {
+		fmt.Fprintf(os.Stderr, "warning: %s: cannot link %s — %s\n", b.Provider, b.Skill, b.Reason)
+	}
+	if p.Empty() {
+		note := ""
+		if len(p.Blocked) > 0 {
+			note = fmt.Sprintf(", apart from %s in the way above", plural(len(p.Blocked), "name"))
+		}
+		fmt.Printf("%s is applied to %s%s\n", s.setName(), strings.Join(s.providerNames(), ", "), note)
+		return s.recordSeeded(want)
+	}
+	err := p.Apply(s.source, func(a plan.Action) {
+		verb := "linked"
+		if !a.Link {
+			verb = "unlinked"
+		}
+		fmt.Printf("%-8s %-8s %s\n", verb, a.Provider, a.Skill.Name)
+	})
+	if err != nil {
+		return err
+	}
+	return s.recordSeeded(want)
+}
+
+// recordSeeded writes down a default set that was seeded from existing links, so
+// from now on memex applies a set the library declares instead of re-deriving
+// one. An empty seed is left alone: writing it would turn the next sync into an
+// unlink-everything.
+func (s *session) recordSeeded(want []string) error {
+	if s.store.Found || len(want) == 0 {
+		return nil
+	}
+	if err := project.Save(s.source, s.store); err != nil {
+		return err
+	}
+	s.store.Found = true
+	fmt.Printf("recorded the default set in %s (%s)\n", shortHome(project.File(s.source)), plural(len(want), "skill"))
 	return nil
+}
+
+// plural renders a count with its noun: "1 skill", "2 skills".
+func plural(n int, noun string) string {
+	if n == 1 {
+		return fmt.Sprintf("%d %s", n, noun)
+	}
+	return fmt.Sprintf("%d %ss", n, noun)
+}
+
+// shortHome abbreviates the user's home directory to ~ for display.
+func shortHome(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
+	}
+	if rel, err := filepath.Rel(home, path); err == nil && !strings.HasPrefix(rel, "..") {
+		return filepath.Join("~", rel)
+	}
+	return path
 }
 
 func confirm(prompt string) bool {
@@ -215,32 +392,26 @@ func confirm(prompt string) bool {
 
 type manageCmd struct{}
 
-// Run opens the global target picker — the only linking flow memex has.
+// Run opens the checklist for the set in force — the default set, or the active
+// project — and applies it to every provider at once.
 func (m *manageCmd) Run(c *cli) error {
-	return pickLoop(c)
+	s, err := c.open()
+	if err != nil {
+		return err
+	}
+	return s.edit(s.setName())
 }
 
-// pickLoop offers the global harness targets and manages the chosen one,
-// returning to the picker afterwards so several targets can be handled in one
-// session.
-func pickLoop(c *cli) error {
-	var options []tui.Option
-	for _, b := range target.Builtins() {
-		options = append(options, tui.Option{Label: b.Name, Path: b.Path})
+type syncCmd struct{}
+
+// Run re-applies the set in force without opening the TUI, which is what you
+// want after installing a new harness or pulling someone else's projects.
+func (sc *syncCmd) Run(c *cli) error {
+	s, err := c.open()
+	if err != nil {
+		return err
 	}
-	if len(options) == 0 {
-		return fmt.Errorf("no global targets present (looked for ~/.claude, ~/.codex, ~/.pi, ~/.agents)")
-	}
-	for {
-		opt, ok, err := tui.Pick("Pick a target", options)
-		if err != nil || !ok {
-			return err
-		}
-		quit, err := c.manage(opt.Path, true)
-		if err != nil || quit {
-			return err
-		}
-	}
+	return s.sync()
 }
 
 type listCmd struct {
@@ -559,7 +730,9 @@ func (d *doctorCmd) Run(c *cli) error {
 	if err != nil {
 		return err
 	}
-	problems := 0
+	// fixable counts the problems --fix can deal with, so the closing hint only
+	// shows up when running it would help.
+	problems, fixable := 0, 0
 
 	libEntries, err := os.ReadDir(source)
 	if err != nil {
@@ -588,6 +761,7 @@ func (d *doctorCmd) Run(c *cli) error {
 	sort.Strings(stale)
 	for _, name := range stale {
 		problems++
+		fixable++
 		if d.Fix {
 			delete(origins, name)
 			fmt.Printf("library: pruned origin entry for missing skill %s\n", name)
@@ -601,6 +775,13 @@ func (d *doctorCmd) Run(c *cli) error {
 		}
 	}
 
+	n, err := d.checkSets(source, skills)
+	if err != nil {
+		return err
+	}
+	problems += n
+	fixable += n
+
 	for _, b := range target.Builtins() {
 		entries, err := target.Scan(b.Path, skills)
 		if err != nil {
@@ -611,6 +792,7 @@ func (d *doctorCmd) Run(c *cli) error {
 				continue
 			}
 			problems++
+			fixable++
 			path := filepath.Join(b.Path, e.Name)
 			if d.Fix {
 				if err := os.Remove(path); err != nil {
@@ -622,12 +804,113 @@ func (d *doctorCmd) Run(c *cli) error {
 			}
 		}
 	}
+
+	n, err = checkDrift(source, skills)
+	if err != nil {
+		return err
+	}
+	problems += n
+
 	if problems == 0 {
 		fmt.Println("all good")
-	} else if !d.Fix {
-		fmt.Println("\nrun `memex doctor --fix` to remove broken links")
+	} else if !d.Fix && fixable > 0 {
+		fmt.Println("\nrun `memex doctor --fix` to remove broken links and prune stale entries")
 	}
 	return nil
+}
+
+// checkSets reports set members the library no longer has, dropping them under
+// --fix, and returns how many it found.
+func (d *doctorCmd) checkSets(source string, skills []library.Skill) (int, error) {
+	store, err := project.Load(source)
+	if err != nil {
+		return 0, err
+	}
+	if !store.Found {
+		return 0, nil
+	}
+	inLibrary := make(map[string]bool, len(skills))
+	for _, s := range skills {
+		inLibrary[s.Name] = true
+	}
+	problems, fixed := 0, false
+	for _, name := range append([]string{project.DefaultName}, store.Names()...) {
+		var kept []string
+		for _, skill := range store.Skills(name) {
+			if inLibrary[skill] {
+				kept = append(kept, skill)
+				continue
+			}
+			problems++
+			if d.Fix {
+				fmt.Printf("%s: dropped %s, which is not in the library\n", name, skill)
+			} else {
+				fmt.Printf("%s: names %s, which is not in the library\n", name, skill)
+			}
+		}
+		if d.Fix && len(kept) != len(store.Skills(name)) {
+			store.SetSkills(name, kept)
+			fixed = true
+		}
+	}
+	if fixed {
+		return problems, project.Save(source, store)
+	}
+	return problems, nil
+}
+
+// checkDrift reports providers that no longer match the set in force — a new
+// harness appeared, or someone linked by hand.
+func checkDrift(source string, skills []library.Skill) (int, error) {
+	store, err := project.Load(source)
+	if err != nil {
+		return 0, err
+	}
+	cfg, err := config.Load()
+	if err != nil {
+		return 0, err
+	}
+	providers := target.Enabled(cfg.DisabledProviders)
+	if len(providers) == 0 {
+		return 0, nil
+	}
+	active, err := project.Active()
+	if err != nil {
+		return 0, err
+	}
+	if !store.Has(active) {
+		fmt.Printf("state: active project %q is not in %s\n", active, project.File(source))
+		return 1, nil
+	}
+	name := project.DefaultName
+	if active != "" {
+		name = active
+	}
+	statuses, err := plan.Survey(providers, skills)
+	if err != nil {
+		return 0, err
+	}
+	// Before any set has been stored the set in force is whatever is linked, so
+	// drift means the providers disagree with each other.
+	want := store.Skills(name)
+	if !store.Found {
+		want = plan.LinkedNames(statuses)
+	}
+	p := plan.Build(providers, statuses, want)
+	problems := 0
+	for _, b := range p.Blocked {
+		problems++
+		fmt.Printf("%s: %s cannot be linked — %s\n", b.Provider, b.Skill, b.Reason)
+	}
+	if !p.Empty() {
+		problems++
+		if store.Found {
+			fmt.Printf("providers: %s is not applied everywhere (%s) — run `memex sync`\n", name, p.Summary())
+		} else {
+			fmt.Printf("providers: they don't all hold the same skills (%s) — run `memex sync` to even them up\n", p.Summary())
+		}
+	}
+	return problems, nil
 }
 
 type upgradeCmd struct {

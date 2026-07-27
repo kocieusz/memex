@@ -7,15 +7,17 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 )
 
-// Option is one row of the target picker.
+// Option is one row of the list picker.
 type Option struct {
 	Label string
-	Path  string
+	// Detail is dimmed text shown after the label.
+	Detail string
 }
 
 type pickerModel struct {
 	title   string
 	options []Option
+	labelW  int
 	cursor  int
 	chosen  int // -1 until picked
 	// quitting blanks the final frame so bubbletea erases the picker instead
@@ -61,7 +63,7 @@ func (m pickerModel) View() string {
 		if i == m.cursor {
 			marker = cursorStyle.Render("▸ ")
 		}
-		fmt.Fprintf(&b, "  %s%-8s %s\n", marker, o.Label, dimStyle.Render(o.Path))
+		fmt.Fprintf(&b, "  %s%-*s  %s\n", marker, m.labelW, o.Label, dimStyle.Render(o.Detail))
 	}
 	b.WriteString("\n")
 	b.WriteString(footer([2]string{"↑/↓", "move"}, [2]string{"enter/→", "select"}, [2]string{"q", "quit"}))
@@ -69,10 +71,14 @@ func (m pickerModel) View() string {
 	return b.String()
 }
 
-// Pick shows a target picker and returns the chosen option, or ok=false if the
+// Pick shows a list picker and returns the chosen option, or ok=false if the
 // user quit.
 func Pick(title string, options []Option) (Option, bool, error) {
-	final, err := tea.NewProgram(pickerModel{title: title, options: options, chosen: -1}).Run()
+	labelW := 0
+	for _, o := range options {
+		labelW = max(labelW, len(o.Label))
+	}
+	final, err := tea.NewProgram(pickerModel{title: title, options: options, labelW: labelW, chosen: -1}).Run()
 	if err != nil {
 		return Option{}, false, err
 	}
