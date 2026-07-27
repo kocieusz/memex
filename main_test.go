@@ -3,12 +3,16 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
 	"github.com/kocieusz/memex/internal/library"
 	"github.com/kocieusz/memex/internal/origin"
+	"github.com/kocieusz/memex/internal/plan"
+	"github.com/kocieusz/memex/internal/project"
 	"github.com/kocieusz/memex/internal/remote"
+	"github.com/kocieusz/memex/internal/target"
 )
 
 func mkSkill(t *testing.T, root, name, content string) string {
@@ -107,5 +111,116 @@ func TestClassifyCloneOtherRepo(t *testing.T) {
 	}
 	if items[0].Conflict != "already in the library" || updates[0] {
 		t.Errorf("skill from another repo must not be offered as update, got %+v", items[0])
+	}
+}
+
+// The checklist lists every library skill, and any name the set still holds
+// after the skill left the library — so it can be unchecked.
+func TestSessionRows(t *testing.T) {
+	lib := t.TempDir()
+	mkSkill(t, lib, "alpha", "a")
+	mkSkill(t, lib, "beta", "b")
+	skills, err := library.Scan(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := &session{
+		source: lib,
+		skills: skills,
+		statuses: []plan.Status{
+			{Skill: skills[0], LinkedIn: []string{"claude"}},
+			{Skill: skills[1], Blocked: []plan.Block{{Provider: "codex", Skill: "beta", Reason: "in the way"}}},
+		},
+	}
+
+	rows := s.rows([]string{"alpha", "ghost"})
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want alpha, beta and the ghost: %+v", len(rows), rows)
+	}
+	if !rows[0].InSet || !slices.Equal(rows[0].LinkedIn, []string{"claude"}) {
+		t.Errorf("alpha = %+v, want in the set and linked in claude", rows[0])
+	}
+	if rows[1].InSet || len(rows[1].Blocked) != 1 || rows[1].Blocked[0].Provider != "codex" {
+		t.Errorf("beta = %+v, want out of the set and blocked in codex", rows[1])
+	}
+	if got := rows[2]; got.Name != "ghost" || !got.Missing || !got.InSet {
+		t.Errorf("ghost = %+v, want a missing set member", got)
+	}
+}
+
+// A machine that has never used projects must not lose its links: the first
+// open seeds the default set from whatever is already linked.
+func TestOpenSeedsDefaultSetFromExistingLinks(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	lib := filepath.Join(home, "lib")
+	alpha := mkSkill(t, lib, "alpha", "a")
+	mkSkill(t, lib, "beta", "b")
+
+	claude := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(alpha, filepath.Join(claude, "alpha")); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &cli{Source: lib}
+	s, err := c.open()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if names := target.Names(s.providers); !slices.Equal(names, []string{"claude"}) {
+		t.Fatalf("providers = %v, want just the detected claude", names)
+	}
+	if got := s.store.Skills(project.DefaultName); !slices.Equal(got, []string{"alpha"}) {
+		t.Errorf("default set = %v, want the already-linked [alpha]", got)
+	}
+	// Seeding is in memory only until something is applied.
+	if _, err := os.Stat(project.File(lib)); !os.IsNotExist(err) {
+		t.Error("open must not write a manifest on its own")
+	}
+	if p := plan.Build(s.providers, s.statuses, s.store.Skills(project.DefaultName)); !p.Empty() {
+		t.Errorf("seeding must leave nothing to apply, got %+v", p.Actions)
+	}
+}
+
+// Providers that disagree are worth reporting even before any project exists —
+// that is the state `memex sync` was added to even up.
+func TestCheckDriftReportsUnevenProvidersWithoutAManifest(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	lib := filepath.Join(home, "lib")
+	alpha := mkSkill(t, lib, "alpha", "a")
+
+	claude := filepath.Join(home, ".claude", "skills")
+	if err := os.MkdirAll(claude, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(home, ".codex", "skills"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(alpha, filepath.Join(claude, "alpha")); err != nil {
+		t.Fatal(err)
+	}
+	skills, err := library.Scan(lib)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	problems, err := checkDrift(lib, skills)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if problems != 1 {
+		t.Errorf("problems = %d, want 1 — codex is missing alpha", problems)
+	}
+
+	// Once every provider agrees, doctor has nothing to say.
+	if err := os.Symlink(alpha, filepath.Join(home, ".codex", "skills", "alpha")); err != nil {
+		t.Fatal(err)
+	}
+	if problems, err = checkDrift(lib, skills); err != nil || problems != 0 {
+		t.Errorf("problems = %d, %v, want 0", problems, err)
 	}
 }

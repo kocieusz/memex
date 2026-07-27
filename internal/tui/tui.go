@@ -1,10 +1,13 @@
-// Package tui implements the interactive screens: the skill checklist for one
-// target directory, and the target picker. The checklist mutates nothing — it
-// returns a Plan that the caller applies.
+// Package tui implements the interactive screens: the checklist that edits one
+// skill set, the multi-select used by `memex clone`, and a small list picker.
+// The checklist mutates nothing — it returns the set the user confirmed and the
+// caller applies it.
 package tui
 
 import (
 	"fmt"
+	"slices"
+	"sort"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -13,38 +16,46 @@ import (
 	"github.com/kocieusz/memex/internal/target"
 )
 
-// Plan is the outcome of the checklist: skill names to link and unlink.
-type Plan struct {
-	Link   []string
-	Unlink []string
+// Blocker is a provider that won't accept a skill, and why.
+type Blocker struct {
+	Provider string
+	Reason   string
 }
 
-func (p Plan) Empty() bool { return len(p.Link) == 0 && len(p.Unlink) == 0 }
-
-func (p Plan) Summary() string {
-	var parts []string
-	if n := len(p.Link); n > 0 {
-		parts = append(parts, fmt.Sprintf("+%d link", n))
-	}
-	if n := len(p.Unlink); n > 0 {
-		parts = append(parts, fmt.Sprintf("−%d unlink", n))
-	}
-	return strings.Join(parts, ", ")
+// Row is one line of the checklist: a library skill, or a name the set holds
+// that the library no longer has.
+type Row struct {
+	Name string
+	// InSet is true when the set being edited already names this skill.
+	InSet bool
+	// LinkedIn names the providers where the skill is linked right now.
+	LinkedIn []string
+	// Blocked names the providers that can't take it, e.g. because a real
+	// directory of the same name is there.
+	Blocked []Blocker
+	// Missing is true for a name the set holds but the library doesn't have.
+	Missing bool
 }
 
-type row struct {
-	entry   target.Entry
-	pending bool // toggled away from its current state
+type setRow struct {
+	row     Row
+	checked bool
 }
 
 // Model is the checklist screen. Exported for tests.
 type Model struct {
-	TargetDir string
-	Source    string
-	// Back is true when quitting returns to a picker rather than the shell.
-	Back bool
+	// Project is the name of the set being edited: "default" or a project.
+	Project string
+	// Source is the library directory, shown in the header.
+	Source string
+	// Providers names the harnesses an apply would touch.
+	Providers []string
+	// Live is true when this set is the active one, so what is linked reflects
+	// it and applying will move symlinks. Editing an inactive project only
+	// changes which skills it names.
+	Live bool
 
-	rows       []row
+	rows       []setRow
 	cursor     int // index into visible()
 	filter     string
 	filtering  bool
@@ -53,43 +64,120 @@ type Model struct {
 	// instead of leaving it to stack under the next program's output.
 	quitting bool
 
-	// Accepted is true when the user confirmed the plan.
+	// Accepted is true when the user confirmed the set.
 	Accepted bool
-	// Quit is true when the user asked to leave the session (q/ctrl+c)
-	// rather than return to the picker (esc/left).
-	Quit bool
 }
 
-// NewModel builds the checklist for entries as returned by target.Scan.
-func NewModel(targetDir, source string, entries []target.Entry) Model {
-	rows := make([]row, len(entries))
-	for i, e := range entries {
-		rows[i] = row{entry: e}
+// NewModel builds the checklist for one set.
+func NewModel(project, source string, providers []string, rows []Row) Model {
+	list := make([]setRow, len(rows))
+	for i, r := range rows {
+		list[i] = setRow{row: r, checked: r.InSet}
 	}
-	return Model{TargetDir: targetDir, Source: source, rows: rows}
+	return Model{Project: project, Source: source, Providers: providers, rows: list}
 }
 
-// Plan returns the pending changes.
-func (m Model) Plan() Plan {
-	var p Plan
+// Set returns the skill names the user has checked, sorted.
+func (m Model) Set() []string {
+	var names []string
 	for _, r := range m.rows {
-		if !r.pending {
+		if r.checked {
+			names = append(names, r.row.Name)
+		}
+	}
+	sort.Strings(names)
+	return names
+}
+
+// Dirty reports whether applying would change anything — the set's membership,
+// or the symlinks that should already match it.
+func (m Model) Dirty() bool {
+	for _, r := range m.rows {
+		switch {
+		case r.checked != r.row.InSet:
+			return true
+		case !m.Live:
+		case r.checked && len(m.pending(r)) > 0:
+			return true
+		case !r.checked && len(r.row.LinkedIn) > 0:
+			return true
+		}
+	}
+	return false
+}
+
+// Summary describes what applying would do, for the confirmation line.
+func (m Model) Summary() string {
+	if !m.Live {
+		added, removed := 0, 0
+		for _, r := range m.rows {
+			switch {
+			case r.checked && !r.row.InSet:
+				added++
+			case !r.checked && r.row.InSet:
+				removed++
+			}
+		}
+		return counts(added, "added", removed, "removed") + " in project " + m.Project
+	}
+	links, unlinks := 0, 0
+	for _, r := range m.rows {
+		if r.checked {
+			links += len(m.pending(r))
+		} else {
+			unlinks += len(r.row.LinkedIn)
+		}
+	}
+	across := fmt.Sprintf(" across %d providers", len(m.Providers))
+	if len(m.Providers) == 1 {
+		across = " in " + m.Providers[0]
+	}
+	return counts(links, "link", unlinks, "unlink") + across
+}
+
+func counts(a int, aWord string, b int, bWord string) string {
+	var parts []string
+	if a > 0 {
+		parts = append(parts, fmt.Sprintf("+%d %s", a, aWord))
+	}
+	if b > 0 {
+		parts = append(parts, fmt.Sprintf("−%d %s", b, bWord))
+	}
+	if len(parts) == 0 {
+		return "no changes"
+	}
+	return strings.Join(parts, ", ")
+}
+
+// pending returns the providers that would gain a link for this row: everything
+// memex manages, minus where it is already linked or can't be.
+func (m Model) pending(r setRow) []string {
+	if r.row.Missing {
+		return nil
+	}
+	var out []string
+	for _, p := range m.Providers {
+		if slices.Contains(r.row.LinkedIn, p) || blocks(r.row.Blocked, p) {
 			continue
 		}
-		switch r.entry.State {
-		case target.Available:
-			p.Link = append(p.Link, r.entry.Name)
-		case target.Linked:
-			p.Unlink = append(p.Unlink, r.entry.Name)
+		out = append(out, p)
+	}
+	return out
+}
+
+func blocks(blockers []Blocker, provider string) bool {
+	for _, b := range blockers {
+		if b.Provider == provider {
+			return true
 		}
 	}
-	return p
+	return false
 }
 
 func (m Model) visible() []int {
 	var idx []int
 	for i, r := range m.rows {
-		if m.filter == "" || strings.Contains(r.entry.Name, m.filter) {
+		if m.filter == "" || strings.Contains(r.row.Name, m.filter) {
 			idx = append(idx, i)
 		}
 	}
@@ -134,11 +222,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	switch key.String() {
-	case "q", "ctrl+c":
-		m.quitting = true
-		m.Quit = true
-		return m, tea.Quit
-	case "esc", "left":
+	case "q", "esc", "ctrl+c":
 		m.quitting = true
 		return m, tea.Quit
 	case "up", "k":
@@ -152,9 +236,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case " ":
 		if vis := m.visible(); len(vis) > 0 {
 			i := vis[m.cursor]
-			if m.rows[i].entry.Toggleable() {
-				m.rows[i].pending = !m.rows[i].pending
-			}
+			m.rows[i].checked = !m.rows[i].checked
 		}
 	case "a":
 		m.setAll(true)
@@ -164,7 +246,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.filtering = true
 		m.filter = ""
 	case "enter":
-		if m.Plan().Empty() {
+		if !m.Dirty() {
 			m.quitting = true
 			return m, tea.Quit
 		}
@@ -173,16 +255,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// setAll pends every toggleable row toward linked (true) or unlinked (false).
-func (m *Model) setAll(linked bool) {
+// setAll checks or unchecks every visible row.
+func (m *Model) setAll(checked bool) {
 	for _, i := range m.visible() {
-		r := &m.rows[i]
-		switch r.entry.State {
-		case target.Available:
-			r.pending = linked
-		case target.Linked:
-			r.pending = !linked
-		}
+		m.rows[i].checked = checked
 	}
 }
 
@@ -218,23 +294,51 @@ func footer(items ...[2]string) string {
 // Dim renders s in the faint style, for secondary detail in plain output.
 func Dim(s string) string { return dimStyle.Render(s) }
 
+// Tone selects the colour of a badge.
+type Tone int
+
+const (
+	// Muted is for states memex doesn't act on.
+	Muted Tone = iota
+	// Good is for something in place: linked, enabled.
+	Good
+	// Info is for something offered but not in place: available.
+	Info
+	// Bad is for something wrong: broken, in the way.
+	Bad
+)
+
+// Badge renders a fixed-width, coloured label for plain CLI output.
+func Badge(t Tone, text string) string {
+	label := fmt.Sprintf("%-10s", text)
+	switch t {
+	case Good:
+		return linkedStyle.Render(label)
+	case Info:
+		return availableStyle.Render(label)
+	case Bad:
+		return brokenStyle.Render(label)
+	default:
+		return dimStyle.Render(label)
+	}
+}
+
 // LibraryBadge is the badge for skills listed from the library itself.
 func LibraryBadge() string {
 	return headStyle.Render(fmt.Sprintf("%-10s", "library"))
 }
 
-// StateBadge renders a fixed-width, colored state label for plain CLI output.
+// StateBadge renders a target entry's state as a badge.
 func StateBadge(s target.State) string {
-	label := fmt.Sprintf("%-10s", s)
 	switch s {
 	case target.Linked:
-		return linkedStyle.Render(label)
+		return Badge(Good, s.String())
 	case target.Available:
-		return availableStyle.Render(label)
+		return Badge(Info, s.String())
 	case target.Broken:
-		return brokenStyle.Render(label)
+		return Badge(Bad, s.String())
 	default:
-		return dimStyle.Render(label)
+		return Badge(Muted, s.String())
 	}
 }
 
@@ -243,22 +347,30 @@ func (m Model) View() string {
 		return ""
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "  %s  %s\n\n",
-		headStyle.Render("Target: "+m.TargetDir),
-		dimStyle.Render("Source: "+m.Source))
+	head := headStyle.Render("Project: " + m.Project)
+	if !m.Live {
+		head += dimStyle.Render(fmt.Sprintf(" (inactive — `memex use %s` applies it)", m.Project))
+	}
+	fmt.Fprintf(&b, "  %s  %s\n", head, dimStyle.Render("Providers: "+strings.Join(m.Providers, ", ")))
+	skills := 0
+	for _, r := range m.rows {
+		if !r.row.Missing {
+			skills++
+		}
+	}
+	fmt.Fprintf(&b, "  %s\n\n", dimStyle.Render(fmt.Sprintf("Source: %s (%d skills)", m.Source, skills)))
 
 	vis := m.visible()
 	nameW := 0
 	for _, i := range vis {
-		nameW = max(nameW, len(m.rows[i].entry.Name))
+		nameW = max(nameW, len(m.rows[i].row.Name))
 	}
 	for pos, i := range vis {
-		r := m.rows[i]
 		marker := "  "
 		if pos == m.cursor {
 			marker = cursorStyle.Render("▸ ")
 		}
-		fmt.Fprintf(&b, "  %s%s\n", marker, renderRow(r, nameW))
+		fmt.Fprintf(&b, "  %s%s\n", marker, m.renderRow(m.rows[i], nameW))
 	}
 	if len(vis) == 0 {
 		b.WriteString(dimStyle.Render("  no skills match\n"))
@@ -267,70 +379,97 @@ func (m Model) View() string {
 	b.WriteString("\n")
 	switch {
 	case m.confirming:
-		fmt.Fprintf(&b, "  %s — proceed? [y/N] ", m.Plan().Summary())
+		fmt.Fprintf(&b, "  %s — proceed? [y/N] ", m.Summary())
 	case m.filtering:
 		fmt.Fprintf(&b, "  /%s▏\n", m.filter)
 	default:
-		items := [][2]string{
-			{"↑/↓", "move"}, {"space", "toggle"},
-			{"a", "all"}, {"n", "none"},
-			{"/", "filter"}, {"enter", "apply"},
+		apply := "apply"
+		if !m.Live {
+			apply = "save"
 		}
-		if m.Back {
-			items = append(items, [2]string{"←", "back"})
-		}
-		items = append(items, [2]string{"q", "quit"})
-		b.WriteString(footer(items...))
+		b.WriteString(footer(
+			[2]string{"↑/↓", "move"}, [2]string{"space", "toggle"},
+			[2]string{"a", "all"}, [2]string{"n", "none"},
+			[2]string{"/", "filter"}, [2]string{"enter", apply},
+			[2]string{"q", "quit"},
+		))
 		b.WriteString("\n")
 	}
 	return b.String()
 }
 
-func renderRow(r row, nameW int) string {
-	e := r.entry
-	name := fmt.Sprintf("%-*s", nameW, e.Name)
-	linked := e.State == target.Linked
-	if r.pending {
-		linked = !linked
+func (m Model) renderRow(r setRow, nameW int) string {
+	name := fmt.Sprintf("%-*s", nameW, r.row.Name)
+	row := fmt.Sprintf("%s %s  %s", m.box(r), name, m.note(r))
+	if len(r.row.Blocked) > 0 && r.checked {
+		var where []string
+		for _, blk := range r.row.Blocked {
+			where = append(where, blk.Provider)
+		}
+		row += brokenStyle.Render("  · blocked in " + strings.Join(where, ", "))
 	}
-	switch e.State {
-	case target.Linked, target.Available:
-		box := "[ ]"
-		if linked {
-			box = linkedStyle.Render("[x]")
-		}
-		note := dimStyle.Render(e.State.String())
-		if r.pending {
-			note = pendingStyle.Render(map[bool]string{true: "will link", false: "will unlink"}[linked])
-		}
-		return fmt.Sprintf("%s %s  %s", box, name, note)
-	case target.Native:
-		note := "native — not managed by memex"
-		if e.Shadows {
-			note += " (shadows a library skill)"
-		}
-		return dimStyle.Render(fmt.Sprintf("( ) %s  %s", name, note))
-	case target.Foreign:
-		return dimStyle.Render(fmt.Sprintf("( ) %s  foreign link → %s", name, e.Dest))
-	case target.Broken:
-		return brokenStyle.Render(fmt.Sprintf("(!) %s  broken link → %s", name, e.Dest))
-	}
-	return name
+	return row
 }
 
-// Run shows the checklist and returns the confirmed plan (empty if the user
-// left or confirmed nothing). quit is true when the user asked to leave the
-// session rather than return to the picker. back shows the ← back hint.
-func Run(targetDir, source string, entries []target.Entry, back bool) (Plan, bool, error) {
-	model := NewModel(targetDir, source, entries)
-	model.Back = back
-	final, err := tea.NewProgram(model).Run()
+func (m Model) box(r setRow) string {
+	switch {
+	case !r.checked:
+		return "[ ]"
+	case r.row.Missing:
+		return brokenStyle.Render("[!]")
+	case m.Live && len(m.pending(r)) > 0:
+		return pendingStyle.Render("[~]")
+	default:
+		return linkedStyle.Render("[x]")
+	}
+}
+
+func (m Model) note(r setRow) string {
+	if r.row.Missing {
+		if r.checked {
+			return brokenStyle.Render("named by this set but not in the library")
+		}
+		return pendingStyle.Render("will drop from the set")
+	}
+	if !m.Live {
+		switch {
+		case r.checked && !r.row.InSet:
+			return pendingStyle.Render("will add")
+		case !r.checked && r.row.InSet:
+			return pendingStyle.Render("will remove")
+		case r.checked:
+			return dimStyle.Render("in project")
+		default:
+			return dimStyle.Render("not in project")
+		}
+	}
+	switch pend := m.pending(r); {
+	case r.checked && len(pend) > 0:
+		return pendingStyle.Render("will link" + scope(pend, m.Providers, "in"))
+	case !r.checked && len(r.row.LinkedIn) > 0:
+		return pendingStyle.Render("will unlink" + scope(r.row.LinkedIn, m.Providers, "from"))
+	case r.checked:
+		return dimStyle.Render("linked" + scope(r.row.LinkedIn, m.Providers, "in"))
+	default:
+		return dimStyle.Render("available")
+	}
+}
+
+// scope names the providers a note applies to, staying silent when it applies
+// to all of them — "will link" reads better than "will link in claude, codex".
+func scope(some, all []string, preposition string) string {
+	if len(some) == 0 || len(some) == len(all) {
+		return ""
+	}
+	return " " + preposition + " " + strings.Join(some, ", ")
+}
+
+// Run shows the checklist and returns the final model: Accepted reports whether
+// the user confirmed, and Set() is the skill set they chose.
+func Run(m Model) (Model, error) {
+	final, err := tea.NewProgram(m).Run()
 	if err != nil {
-		return Plan{}, false, err
+		return Model{}, err
 	}
-	m := final.(Model)
-	if !m.Accepted {
-		return Plan{}, m.Quit, nil
-	}
-	return m.Plan(), m.Quit, nil
+	return final.(Model), nil
 }
